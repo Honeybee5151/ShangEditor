@@ -5,6 +5,8 @@ import com.company.assembleegameclient.editor.CommandEvent;
    import com.company.assembleegameclient.editor.CommandList;
    import com.company.assembleegameclient.editor.CommandQueue;
    import com.company.assembleegameclient.map.GroundLibrary;
+   //editor8182381
+   import com.company.assembleegameclient.map.GroundProperties;
    import com.company.assembleegameclient.map.RegionLibrary;
    import com.company.assembleegameclient.objects.ObjectLibrary;
    import com.company.assembleegameclient.screens.AccountScreen;
@@ -22,7 +24,15 @@ import flash.geom.Rectangle;
    import flash.net.FileFilter;
    import flash.net.FileReference;
 import flash.text.TextFieldAutoSize;
+//editor8182381
+import flash.display.BitmapData;
 import flash.utils.ByteArray;
+   //editor8182381
+   import flash.utils.Dictionary;
+   //editor8182381 — AIR native file API (fixes FileReference.load() Error #3003)
+   import flash.filesystem.File;
+   import flash.filesystem.FileStream;
+   import flash.filesystem.FileMode;
    import kabam.lib.json.JsonParser;
    import kabam.rotmg.core.StaticInjectorContext;
 import kabam.rotmg.core.signals.SetScreenSignal;
@@ -58,10 +68,20 @@ public class EditingScreen extends Sprite
       public var chooser_:Chooser;
       
       public var filename_:String = null;
-      
+
       private var json:JsonParser;
-      
+
       private var loadedFile_:FileReference = null;
+
+      //editor8182381 — Custom tile metadata for round-trip JM save/load
+      // Maps typeCode → {id: originalCustomId, groundPixels: base64, blocked: Boolean, blendPriority: int, speed: Number}
+      private var customGroundMeta_:Dictionary = new Dictionary();
+      // Maps typeCode → {id: originalCustomId, objectPixels: base64, objectClass: String, objectSize: int}
+      private var customObjectMeta_:Dictionary = new Dictionary();
+      // Maps tile position "x,y" → {blocked: Boolean, blendPriority: int, speed: Number}
+      private var tileProperties_:Dictionary = new Dictionary();
+      //editor8182381 — Next type code for custom grounds loaded from JM
+      private var nextCustomGroundType_:uint = 0x8000;
 
       private var _search:TextInputField;
 
@@ -72,6 +92,8 @@ public class EditingScreen extends Sprite
       public function EditingScreen()
       {
          super();
+         //editor8182381 — Build verification trace
+         trace("[Editor] === EditingScreen INITIALIZED (build v2) ===");
          this._search = new TextInputField("", false, "", "Search");
          this._search.x = 550;
          this._search.y = 6;
@@ -305,8 +327,13 @@ public class EditingScreen extends Sprite
          var bounds:Rectangle = this.meMap_.getTileBounds();
          if(bounds == null)
          {
+            trace("[Editor] createMapJSON: no tile bounds, returning null");
             return null;
          }
+         //editor8182381 — Debug: log save/test dimensions and custom tile counts
+         trace("[Editor] createMapJSON: bounds=" + bounds.x + "," + bounds.y + " " + bounds.width + "x" + bounds.height);
+         var customGroundCount:int = 0;
+         var customObjCount:int = 0;
          var jm:Object = {};
          jm["width"] = int(bounds.width);
          jm["height"] = int(bounds.height);
@@ -318,13 +345,32 @@ public class EditingScreen extends Sprite
             for(xi = bounds.x; xi < bounds.right; xi++)
             {
                tile = this.meMap_.getTile(xi,yi);
-               entry = this.getEntry(tile);
+               //editor8182381 — Use position-aware entry builder for custom tile round-trip
+               entry = this.getEntryWithPos(tile, xi, yi);
                entryJSON = this.json.stringify(entry);
                if(!dict.hasOwnProperty(entryJSON))
                {
                   index = entries.length;
                   dict[entryJSON] = index;
                   entries.push(entry);
+                  //editor8182381 — Debug: log new dict entries with custom data
+                  if (entry.hasOwnProperty("groundPixels"))
+                  {
+                     customGroundCount++;
+                     trace("[Editor] Dict[" + index + "] custom ground: " + entry["ground"] + " pixels=" + String(entry["groundPixels"]).substr(0,30) + "...");
+                  }
+                  if (entry.hasOwnProperty("objs"))
+                  {
+                     var eObjs:Array = entry["objs"];
+                     for each (var eObj:Object in eObjs)
+                     {
+                        if (eObj.hasOwnProperty("objectPixels"))
+                        {
+                           customObjCount++;
+                           trace("[Editor] Dict[" + index + "] custom obj: " + eObj["id"] + " class=" + eObj["objectClass"]);
+                        }
+                     }
+                  }
                }
                else
                {
@@ -336,20 +382,27 @@ public class EditingScreen extends Sprite
          jm["dict"] = entries;
          byteArray.compress();
          jm["data"] = Base64.encodeByteArray(byteArray);
-         return this.json.stringify(jm);
+         trace("[Editor] createMapJSON done: " + entries.length + " dict entries, " + customGroundCount + " custom grounds, " + customObjCount + " custom objs");
+         var result:String = this.json.stringify(jm);
+         trace("[Editor] JM output length: " + result.length + " chars");
+         return result;
       }
       
       private function onSave(event:CommandEvent) : void
       {
+         trace("[Editor] onSave triggered");
          var mapJSON:String = this.createMapJSON();
          if(mapJSON == null)
          {
+            trace("[Editor] onSave: mapJSON is null (no tiles?)");
             return;
          }
+         trace("[Editor] onSave: saving " + mapJSON.length + " chars as " + (this.filename_ == null ? "map.jm" : this.filename_));
          new FileReference().save(mapJSON,this.filename_ == null?"map.jm":this.filename_);
       }
       
-      private function getEntry(tile:METile) : Object
+      //editor8182381 — Enhanced getEntry: includes custom ground/object pixel data and properties
+      private function getEntryWithPos(tile:METile, tileX:int, tileY:int) : Object
       {
          var types:Vector.<int> = null;
          var id:String = null;
@@ -360,16 +413,43 @@ public class EditingScreen extends Sprite
             types = tile.types_;
             if(types[Layer.GROUND] != -1)
             {
-               id = GroundLibrary.getIdFromType(types[Layer.GROUND]);
+               var gType:int = types[Layer.GROUND];
+               id = GroundLibrary.getIdFromType(gType);
                entry["ground"] = id;
+               //editor8182381 — Include groundPixels for custom ground tiles
+               if (this.customGroundMeta_[gType] != null)
+               {
+                  var gMeta:Object = this.customGroundMeta_[gType];
+                  entry["ground"] = gMeta.id;
+                  entry["groundPixels"] = gMeta.groundPixels;
+               }
+            }
+            //editor8182381 — Include tile properties if they exist
+            var propKey:String = tileX + "," + tileY;
+            if (this.tileProperties_[propKey] != null)
+            {
+               var tProps:Object = this.tileProperties_[propKey];
+               if (tProps.blocked == true) entry["blocked"] = true;
+               if (tProps.blendPriority != null && tProps.blendPriority != -1) entry["blendPriority"] = tProps.blendPriority;
+               if (tProps.speed != null && tProps.speed != 1.0) entry["speed"] = tProps.speed;
             }
             if(types[Layer.OBJECT] != -1)
             {
-               id = ObjectLibrary.getIdFromType(types[Layer.OBJECT]);
+               var oType:int = types[Layer.OBJECT];
+               id = ObjectLibrary.getIdFromType(oType);
                obj = {"id":id};
                if(tile.objName_ != null)
                {
                   obj["name"] = tile.objName_;
+               }
+               //editor8182381 — Include objectPixels for custom objects
+               if (this.customObjectMeta_[oType] != null)
+               {
+                  var oMeta:Object = this.customObjectMeta_[oType];
+                  obj["id"] = oMeta.id;
+                  obj["objectPixels"] = oMeta.objectPixels;
+                  obj["objectClass"] = oMeta.objectClass;
+                  obj["objectSize"] = oMeta.objectSize;
                }
                entry["objs"] = [obj];
             }
@@ -384,27 +464,54 @@ public class EditingScreen extends Sprite
       
       private function onLoad(event:CommandEvent) : void
       {
-         this.loadedFile_ = new FileReference();
-         this.loadedFile_.addEventListener(Event.SELECT,this.onFileBrowseSelect);
-         this.loadedFile_.browse([new FileFilter("JSON Map (*.jm)","*.jm")]);
-      }
-      
-      private function onFileBrowseSelect(event:Event) : void
-      {
-         var loadedFile:FileReference = event.target as FileReference;
-         loadedFile.addEventListener(Event.COMPLETE,this.onFileLoadComplete);
-         loadedFile.addEventListener(IOErrorEvent.IO_ERROR,this.onFileLoadIOError);
+         trace("[Editor] onLoad triggered");
          try
          {
-            loadedFile.load();
+            //editor8182381 — Use AIR native File API instead of FileReference (fixes Error #3003)
+            var file:File = File.desktopDirectory;
+            trace("[Editor] Desktop dir: " + file.nativePath);
+            file.addEventListener(Event.SELECT, this.onAirFileSelect);
+            file.browseForOpen("Select JM file", [new FileFilter("JSON Map (*.jm, *.json)", "*.jm;*.json")]);
+            trace("[Editor] browseForOpen called OK");
          }
          catch(e:Error)
          {
-            trace("Error: " + e);
+            trace("[Editor] onLoad FAILED: " + e.message + " id=" + e.errorID + "\n" + e.getStackTrace());
+         }
+      }
+
+      //editor8182381 — AIR native file select + read (replaces FileReference.load)
+      private function onAirFileSelect(event:Event) : void
+      {
+         var file:File = event.target as File;
+         file.removeEventListener(Event.SELECT, this.onAirFileSelect);
+         trace("[Editor] File selected: " + file.nativePath + " size=" + file.size);
+         try
+         {
+            var stream:FileStream = new FileStream();
+            stream.open(file, FileMode.READ);
+            var content:String = stream.readUTFBytes(stream.bytesAvailable);
+            stream.close();
+            this.filename_ = file.name;
+            trace("[Editor] File read OK, length=" + content.length);
+            this.processJmContent(content);
+         }
+         catch(e:Error)
+         {
+            trace("[Editor] File read FAILED: " + e.message + "\n" + e.getStackTrace());
          }
       }
       
+      //editor8182381 — Legacy FileReference callback (kept for compatibility)
       private function onFileLoadComplete(event:Event) : void
+      {
+         var loadedFile:FileReference = event.target as FileReference;
+         this.filename_ = loadedFile.name;
+         this.processJmContent(loadedFile.data.toString());
+      }
+
+      //editor8182381 — Process JM content string (shared by AIR File and FileReference paths)
+      private function processJmContent(content:String) : void
       {
          var type:int = 0;
          var xi:int = 0;
@@ -413,17 +520,124 @@ public class EditingScreen extends Sprite
          var regions:Array = null;
          var obj:Object = null;
          var region:Object = null;
-         var loadedFile:FileReference = event.target as FileReference;
-         this.filename_ = loadedFile.name;
-         var jm:Object = this.json.parse(loadedFile.data.toString());
+         //editor8182381 — Wrap entire load in try/catch to capture crash errors
+         try
+         {
+         var jm:Object = this.json.parse(content);
          var w:int = jm["width"];
          var h:int = jm["height"];
          var bounds:Rectangle = new Rectangle(int(MEMap.NUM_SQUARES / 2 - w / 2),int(MEMap.NUM_SQUARES / 2 - h / 2),w,h);
          this.meMap_.clear();
          this.commandQueue_.clear();
+         //editor8182381 — Reset custom tile tracking
+         this.customGroundMeta_ = new Dictionary();
+         this.customObjectMeta_ = new Dictionary();
+         this.tileProperties_ = new Dictionary();
+         this.nextCustomGroundType_ = 0x8000;
+         //editor8182381 — Clear any previous custom entries
+         GroundLibrary.customGroundBitmaps_ = new Dictionary();
+         //editor8182381 — Pre-register custom grounds from dict so they get type codes before tile placement
          var dict:Array = jm["dict"];
+         var customGroundIdToType:Dictionary = new Dictionary();
+         var customObjIdToType:Dictionary = new Dictionary();
+         var nextCustomObjType:uint = 0x9000;
+         trace("[Editor] Loading JM: " + w + "x" + h + " dict=" + dict.length);
+         for (var di:int = 0; di < dict.length; di++)
+         {
+            var dictEntry:Object = dict[di];
+            //editor8182381 — Register custom ground tiles
+            if (dictEntry.hasOwnProperty("ground"))
+            {
+               var groundId:String = dictEntry["ground"];
+               if (groundId.indexOf("custom_") == 0 && dictEntry.hasOwnProperty("groundPixels") && customGroundIdToType[groundId] == null)
+               {
+                  //editor8182381 — Use int from the start to avoid int/uint Dictionary key mismatch
+                  var gTypeCode:int = int(this.nextCustomGroundType_++);
+                  customGroundIdToType[groundId] = gTypeCode;
+                  var gPixelsB64:String = dictEntry["groundPixels"];
+                  var gPixelsBA:ByteArray = Base64.decodeToByteArray(gPixelsB64);
+                  var noWalk:Boolean = dictEntry.hasOwnProperty("blocked") && dictEntry["blocked"] == true;
+                  var bp:int = dictEntry.hasOwnProperty("blendPriority") ? int(dictEntry["blendPriority"]) : -1;
+                  var spd:Number = dictEntry.hasOwnProperty("speed") ? Number(dictEntry["speed"]) : 1.0;
+                  //editor8182381 — Build BitmapData inline from pixel data
+                  var gBmd:BitmapData = new BitmapData(8, 8, false, 0x000000);
+                  if (gPixelsBA != null && gPixelsBA.length >= 192)
+                  {
+                     gPixelsBA.position = 0;
+                     for (var py:int = 0; py < 8; py++)
+                     {
+                        for (var px:int = 0; px < 8; px++)
+                        {
+                           var pr:int = gPixelsBA.readUnsignedByte();
+                           var pg:int = gPixelsBA.readUnsignedByte();
+                           var pb:int = gPixelsBA.readUnsignedByte();
+                           gBmd.setPixel(px, py, (pr << 16) | (pg << 8) | pb);
+                        }
+                     }
+                  }
+                  else
+                  {
+                     trace("[Editor] WARNING: groundPixels len=" + (gPixelsBA != null ? gPixelsBA.length : "null"));
+                  }
+                  //editor8182381 — Create proper GroundProperties (not shared defaultProps_) so getIdFromType works
+                  var dummyXml:XML = <Ground type={gTypeCode} id={groundId} />;
+                  var gProps:GroundProperties = new GroundProperties(dummyXml);
+                  gProps.noWalk_ = noWalk;
+                  gProps.blendPriority_ = bp;
+                  gProps.speed_ = spd;
+                  GroundLibrary.propsLibrary_[gTypeCode] = gProps;
+                  GroundLibrary.idToType_[groundId] = gTypeCode;
+                  //editor8182381 — Store BitmapData in direct lookup (bypasses TextureDataConcrete completely)
+                  GroundLibrary.customGroundBitmaps_[gTypeCode] = gBmd;
+                  //editor8182381 — Store metadata for round-trip save
+                  this.customGroundMeta_[gTypeCode] = {
+                     id: groundId,
+                     groundPixels: gPixelsB64,
+                     blocked: noWalk,
+                     blendPriority: bp,
+                     speed: spd
+                  };
+                  trace("[Editor] Registered ground: " + groundId.substr(0,40) + " type=" + gTypeCode);
+               }
+            }
+            //editor8182381 — Register custom objects
+            if (dictEntry.hasOwnProperty("objs") && dictEntry["objs"] is Array)
+            {
+               var dictObjs:Array = dictEntry["objs"];
+               for each (var dObj:Object in dictObjs)
+               {
+                  if (dObj.hasOwnProperty("objectPixels") && dObj.hasOwnProperty("id") && customObjIdToType[dObj["id"]] == null)
+                  {
+                     var oTypeCode:int = int(nextCustomObjType++);
+                     customObjIdToType[dObj["id"]] = oTypeCode;
+                     var oPixelsB64:String = dObj["objectPixels"];
+                     var oPixelsBA:ByteArray = Base64.decodeToByteArray(oPixelsB64);
+                     var oSize:int = dObj.hasOwnProperty("objectSize") ? int(dObj["objectSize"]) : 8;
+                     var oClass:String = dObj.hasOwnProperty("objectClass") ? String(dObj["objectClass"]) : "Object";
+                     var classFlag:int = 0;
+                     if (oClass == "Destructible") classFlag = 1;
+                     else if (oClass == "Decoration") classFlag = 2;
+                     else if (oClass == "Wall") classFlag = 3;
+                     else if (oClass == "Blocker") classFlag = 4;
+                     if (oSize > 0 && oPixelsBA != null && oPixelsBA.length >= oSize * oSize * 3)
+                        GroundLibrary.loadBinaryCustomObject(uint(oTypeCode), oPixelsBA, oSize, classFlag);
+                     //editor8182381 — Register in ObjectLibrary idToType_
+                     ObjectLibrary.idToType_[dObj["id"]] = oTypeCode;
+                     this.customObjectMeta_[oTypeCode] = {
+                        id: dObj["id"],
+                        objectPixels: oPixelsB64,
+                        objectClass: oClass,
+                        objectSize: oSize
+                     };
+                     trace("[Editor] Registered object: " + String(dObj["id"]).substr(0,40) + " type=" + oTypeCode);
+                  }
+               }
+            }
+         }
+         trace("[Editor] Dict scan done. Custom grounds: " + (int(this.nextCustomGroundType_) - 0x8000) + " objects: " + (int(nextCustomObjType) - 0x9000));
          var byteArray:ByteArray = Base64.decodeToByteArray(jm["data"]);
          byteArray.uncompress();
+         trace("[Editor] Placing tiles in bounds: " + bounds.x + "," + bounds.y + " to " + bounds.right + "," + bounds.bottom);
          for(var yi:int = bounds.y; yi < bounds.bottom; yi++)
          {
             for(xi = bounds.x; xi < bounds.right; xi++)
@@ -431,17 +645,43 @@ public class EditingScreen extends Sprite
                entry = dict[byteArray.readShort()];
                if(entry.hasOwnProperty("ground"))
                {
-                  type = GroundLibrary.idToType_[entry["ground"]];
-                  this.meMap_.modifyTile(xi,yi,Layer.GROUND,type);
+                  var gId:String = entry["ground"];
+                  //editor8182381 — Custom tiles use local dedup dictionary, standard tiles use idToType_
+                  if (gId.indexOf("custom_") == 0 && customGroundIdToType[gId] != null)
+                  {
+                     type = int(customGroundIdToType[gId]);
+                     this.meMap_.modifyTile(xi,yi,Layer.GROUND,type);
+                  }
+                  else if (GroundLibrary.idToType_[gId] != null)
+                  {
+                     type = GroundLibrary.idToType_[gId];
+                     this.meMap_.modifyTile(xi,yi,Layer.GROUND,type);
+                  }
+                  else
+                  {
+                     trace("[Editor] ERROR: Unknown ground: " + gId);
+                  }
+               }
+               //editor8182381 — Store per-tile properties for round-trip
+               if (entry.hasOwnProperty("blocked") || entry.hasOwnProperty("blendPriority") || entry.hasOwnProperty("speed"))
+               {
+                  var tProps:Object = {};
+                  if (entry.hasOwnProperty("blocked")) tProps.blocked = entry["blocked"];
+                  if (entry.hasOwnProperty("blendPriority")) tProps.blendPriority = entry["blendPriority"];
+                  if (entry.hasOwnProperty("speed")) tProps.speed = entry["speed"];
+                  this.tileProperties_[xi + "," + yi] = tProps;
                }
                objs = entry["objs"];
                if(objs != null)
                {
                   for each(obj in objs)
                   {
+                     //editor8182381 — Skip invisible blockers
+                     if (obj.hasOwnProperty("objectClass") && obj["objectClass"] == "Blocker" && !obj.hasOwnProperty("objectPixels"))
+                        continue;
                      if(!ObjectLibrary.idToType_.hasOwnProperty(obj["id"]))
                      {
-                        trace("ERROR: Unable to find: " + obj["id"]);
+                        trace("[Editor] ERROR: Unknown object: " + obj["id"]);
                      }
                      else
                      {
@@ -459,23 +699,43 @@ public class EditingScreen extends Sprite
                {
                   for each(region in regions)
                   {
-                     type = RegionLibrary.idToType_[region["id"]];
-                     this.meMap_.modifyTile(xi,yi,Layer.REGION,type);
+                     if (RegionLibrary.idToType_[region["id"]] != null)
+                     {
+                        type = RegionLibrary.idToType_[region["id"]];
+                        this.meMap_.modifyTile(xi,yi,Layer.REGION,type);
+                     }
                   }
                }
             }
          }
+         trace("[Editor] All tiles placed, calling draw()");
          this.meMap_.draw();
+         trace("[Editor] JM load complete!");
+         }
+         catch (e:Error)
+         {
+            trace("[Editor] CRASH in onFileLoadComplete: " + e.message + "\n" + e.getStackTrace());
+         }
       }
       
-      private function onFileLoadIOError(event:Event) : void
+      private function onFileLoadIOError(event:IOErrorEvent) : void
       {
-         trace("error: " + event);
+         trace("[Editor] IO Error loading file: " + event.text + " errorID=" + event.errorID);
       }
       
       private function onTest(event:Event) : void
       {
-         dispatchEvent(new MapTestEvent(this.createMapJSON()));
+         trace("[Editor] onTest triggered — building JM for server test");
+         var mapJSON:String = this.createMapJSON();
+         if (mapJSON != null)
+         {
+            trace("[Editor] onTest: dispatching MapTestEvent, JM length=" + mapJSON.length);
+         }
+         else
+         {
+            trace("[Editor] onTest: mapJSON is null, no tiles to test");
+         }
+         dispatchEvent(new MapTestEvent(mapJSON));
       }
    }
 }

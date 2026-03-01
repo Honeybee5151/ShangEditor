@@ -29,6 +29,8 @@ public class GroundLibrary
 
    //editor8182381 — Storage for custom object sprites (typeCode → BitmapData)
    public static var customObjectSprites_:Dictionary = new Dictionary();
+   //editor8182381 — Direct BitmapData lookup for custom grounds (bypasses TextureDataConcrete)
+   public static var customGroundBitmaps_:Dictionary = new Dictionary();
    //editor8182381 — Track registered custom type codes for cleanup on disconnect
    public static var customGroundTypeCodes_:Vector.<uint> = new Vector.<uint>();
    public static var customObjectTypeCodes_:Vector.<uint> = new Vector.<uint>();
@@ -66,6 +68,9 @@ public class GroundLibrary
 
    public static function getBitmapData(_arg_1:int, _arg_2:int=0):BitmapData
    {
+      //editor8182381 — Check direct custom bitmap lookup first (editor JM load path)
+      var customBmd:BitmapData = customGroundBitmaps_[_arg_1];
+      if (customBmd != null) return customBmd;
       //editor8182381 — Null safety for custom ground types not yet registered
       var td:Object = typeToTextureData_[_arg_1];
       if (td == null) return null;
@@ -101,8 +106,10 @@ public class GroundLibrary
 
 
    //editor8182381 — Load a custom ground tile from binary RGB pixel data (192 bytes = 8x8 x 3 RGB)
+   //editor8182381 — Use int for Dictionary keys to match parseFromXML (AS3 Dictionary treats int/uint as different keys)
    public static function loadBinaryCustomGround(typeCode:uint, pixels:ByteArray, noWalk:Boolean, blendPriority:int = -1, speed:Number = 1.0):void
    {
+      var iType:int = int(typeCode);
       var bmd:BitmapData = new BitmapData(8, 8, false, 0x000000);
       pixels.position = 0;
       for (var y:int = 0; y < 8; y++)
@@ -122,19 +129,21 @@ public class GroundLibrary
       props.noWalk_ = noWalk;
       props.blendPriority_ = blendPriority;
       props.speed_ = speed;
-      propsLibrary_[typeCode] = props;
+      propsLibrary_[iType] = props;
 
       //editor8182381 — Create TextureDataConcrete with dummy XML (no texture tags = safe),
       //               then set texture_ directly. getTexture() returns texture_ when randomTextureData_ is null.
       var td:TextureDataConcrete = new TextureDataConcrete(dummyXml);
       td.texture_ = bmd;
-      typeToTextureData_[typeCode] = td;
+      typeToTextureData_[iType] = td;
    }
 
    //editor8182381 — Load a custom object sprite from binary RGB pixel data and register in ObjectLibrary
    // classFlag: 0=Object, 1=Destructible, 2=Decoration, 3=Wall, 4=Blocker
+   //editor8182381 — Use int for Dictionary keys to match ObjectLibrary.parseFromXML
    public static function loadBinaryCustomObject(typeCode:uint, pixels:ByteArray, spriteSize:int, classFlag:int = 0):void
    {
+      var iType:int = int(typeCode);
       var bmd:BitmapData = new BitmapData(spriteSize, spriteSize, false, 0x000000);
       pixels.position = 0;
       for (var y:int = 0; y < spriteSize; y++)
@@ -147,7 +156,7 @@ public class GroundLibrary
             bmd.setPixel(x, y, (r << 16) | (g << 8) | b);
          }
       }
-      customObjectSprites_[typeCode] = bmd;
+      customObjectSprites_[iType] = bmd;
       customObjectTypeCodes_.push(typeCode);
 
       //editor8182381 — Build XML matching server's BuildCustomObjectXml based on classFlag
@@ -185,46 +194,52 @@ public class GroundLibrary
       }
       // classFlag == 2 (Decoration) — no extra tags
 
-      ObjectLibrary.xmlLibrary_[typeCode] = objXml;
-      ObjectLibrary.propsLibrary_[typeCode] = new ObjectProperties(objXml);
+      ObjectLibrary.xmlLibrary_[iType] = objXml;
+      ObjectLibrary.propsLibrary_[iType] = new ObjectProperties(objXml);
 
       //editor8182381 — Set texture via TextureDataConcrete with dummy XML, then override texture_
       var td:TextureDataConcrete = new TextureDataConcrete(objXml);
       td.texture_ = bmd;
-      ObjectLibrary.typeToTextureData_[typeCode] = td;
+      ObjectLibrary.typeToTextureData_[iType] = td;
    }
 
    //editor8182381 — Clean up all custom ground/object entries to prevent memory leaks on disconnect
+   //editor8182381 — Use int() cast for Dictionary keys to match how entries were stored
    public static function clearCustomEntries():void
    {
       var i:int;
       var tc:uint;
+      var itc:int;
       // Dispose custom ground BitmapData and remove from dictionaries
       for (i = 0; i < customGroundTypeCodes_.length; i++)
       {
          tc = customGroundTypeCodes_[i];
-         if (typeToTextureData_[tc] != null && typeToTextureData_[tc].texture_ != null)
-            typeToTextureData_[tc].texture_.dispose();
-         delete propsLibrary_[tc];
-         delete xmlLibrary_[tc];
-         delete typeToTextureData_[tc];
-         delete tileTypeColorDict_[tc];
+         itc = int(tc);
+         if (typeToTextureData_[itc] != null && typeToTextureData_[itc].texture_ != null)
+            typeToTextureData_[itc].texture_.dispose();
+         delete propsLibrary_[itc];
+         delete xmlLibrary_[itc];
+         delete typeToTextureData_[itc];
+         delete tileTypeColorDict_[itc];
       }
       // Dispose custom object BitmapData and remove from ObjectLibrary
       for (i = 0; i < customObjectTypeCodes_.length; i++)
       {
          tc = customObjectTypeCodes_[i];
-         if (customObjectSprites_[tc] != null)
-            BitmapData(customObjectSprites_[tc]).dispose();
-         delete customObjectSprites_[tc];
-         if (ObjectLibrary.typeToTextureData_[tc] != null && ObjectLibrary.typeToTextureData_[tc].texture_ != null)
-            ObjectLibrary.typeToTextureData_[tc].texture_.dispose();
-         delete ObjectLibrary.xmlLibrary_[tc];
-         delete ObjectLibrary.propsLibrary_[tc];
-         delete ObjectLibrary.typeToTextureData_[tc];
+         itc = int(tc);
+         if (customObjectSprites_[itc] != null)
+            BitmapData(customObjectSprites_[itc]).dispose();
+         delete customObjectSprites_[itc];
+         if (ObjectLibrary.typeToTextureData_[itc] != null && ObjectLibrary.typeToTextureData_[itc].texture_ != null)
+            ObjectLibrary.typeToTextureData_[itc].texture_.dispose();
+         delete ObjectLibrary.xmlLibrary_[itc];
+         delete ObjectLibrary.propsLibrary_[itc];
+         delete ObjectLibrary.typeToTextureData_[itc];
       }
       customGroundTypeCodes_.length = 0;
       customObjectTypeCodes_.length = 0;
+      //editor8182381 — Clear direct bitmap lookup
+      customGroundBitmaps_ = new Dictionary();
    }
 
 }

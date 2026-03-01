@@ -60,6 +60,9 @@ public class NewEditorScreen extends Sprite {
     }
 
     private function onEditorExit(e:Event):void { // Go back to title screen
+        //editor8182381 — Remove window-level listener to prevent crash when closing game from other screens
+        if (this.window != null)
+            this.window.removeEventListener(Event.CLOSING, this.onMapTestDone);
         this.injector.getInstance(GotoPreviousScreenSignal).dispatch();
     }
 
@@ -73,9 +76,13 @@ public class NewEditorScreen extends Sprite {
         addChild(this.gameSprite);
     }
 
+    //editor8182381 — Null check prevents crash when window closes without active gameSprite
     private function onMapTestDone(event:Event):void {
-        this.cleanupGameSprite();
-        this.editorView.visible = true;
+        if (this.gameSprite != null)
+        {
+            this.cleanupGameSprite();
+            this.editorView.visible = true;
+        }
     }
 
     private function cleanupGameSprite():void {
