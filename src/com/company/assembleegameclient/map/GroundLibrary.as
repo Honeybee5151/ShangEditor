@@ -107,7 +107,11 @@ public class GroundLibrary
 
    //editor8182381 — Load a custom ground tile from binary RGB pixel data (192 bytes = 8x8 x 3 RGB)
    //editor8182381 — Use int for Dictionary keys to match parseFromXML (AS3 Dictionary treats int/uint as different keys)
-   public static function loadBinaryCustomGround(typeCode:uint, pixels:ByteArray, noWalk:Boolean, blendPriority:int = -1, speed:Number = 1.0):void
+   //editor8182381 — Extended with advanced ground params (damage, sink, animate, push, slide)
+   public static function loadBinaryCustomGround(typeCode:uint, pixels:ByteArray, noWalk:Boolean, blendPriority:int = -1, speed:Number = 1.0,
+      minDamage:int = 0, maxDamage:int = 0, sink:Boolean = false,
+      animType:uint = 0, animDx:Number = 0, animDy:Number = 0,
+      push:Boolean = false, slideAmount:Number = 0):void
    {
       var iType:int = int(typeCode);
       var bmd:BitmapData = new BitmapData(8, 8, false, 0x000000);
@@ -122,18 +126,40 @@ public class GroundLibrary
             bmd.setPixel(x, y, (r << 16) | (g << 8) | b);
          }
       }
-      //editor8182381 — Track for cleanup and create GroundProperties from minimal XML
+      //editor8182381 — Track for cleanup and build XML with all properties
       customGroundTypeCodes_.push(typeCode);
-      var dummyXml:XML = <Ground type={typeCode} id={"CustomGround_" + typeCode.toString(16)} />;
-      var props:GroundProperties = new GroundProperties(dummyXml);
+      //editor8182381 — Build tile XML with advanced properties when any are non-default
+      var hasAdvanced:Boolean = blendPriority != -1 || speed != 1.0 ||
+         minDamage > 0 || maxDamage > 0 || sink || animType != 0 || push || slideAmount != 0;
+      var tileXml:XML;
+      if (hasAdvanced)
+      {
+         tileXml = <Ground type={typeCode} id={"CustomGround_" + typeCode.toString(16)}>
+            <Texture><File>lofiEnvironment2</File><Index>0x0b</Index></Texture>
+         </Ground>;
+         if (blendPriority != -1) tileXml.appendChild(<BlendPriority>{blendPriority}</BlendPriority>);
+         if (speed != 1.0) tileXml.appendChild(<Speed>{speed}</Speed>);
+         if (noWalk) tileXml.appendChild(<NoWalk/>);
+         //editor8182381 — Append advanced property XML elements (damage, sink, animate, push, slide)
+         if (minDamage > 0) tileXml.appendChild(<MinDamage>{minDamage}</MinDamage>);
+         if (maxDamage > 0) tileXml.appendChild(<MaxDamage>{maxDamage}</MaxDamage>);
+         if (sink) tileXml.appendChild(<Sink/>);
+         if (animType == 1) tileXml.appendChild(<Animate dx={animDx} dy={animDy}>Wave</Animate>);
+         else if (animType == 2) tileXml.appendChild(<Animate dx={animDx} dy={animDy}>Flow</Animate>);
+         if (push) tileXml.appendChild(<Push/>);
+         if (slideAmount != 0) tileXml.appendChild(<SlideAmount>{slideAmount}</SlideAmount>);
+      }
+      else
+      {
+         tileXml = <Ground type={typeCode} id={"CustomGround_" + typeCode.toString(16)} />;
+      }
+      var props:GroundProperties = new GroundProperties(tileXml);
       props.noWalk_ = noWalk;
-      props.blendPriority_ = blendPriority;
-      props.speed_ = speed;
       propsLibrary_[iType] = props;
 
       //editor8182381 — Create TextureDataConcrete with dummy XML (no texture tags = safe),
       //               then set texture_ directly. getTexture() returns texture_ when randomTextureData_ is null.
-      var td:TextureDataConcrete = new TextureDataConcrete(dummyXml);
+      var td:TextureDataConcrete = new TextureDataConcrete(tileXml);
       td.texture_ = bmd;
       typeToTextureData_[iType] = td;
    }

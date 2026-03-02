@@ -37,9 +37,19 @@ package kabam.rotmg.messaging.impl.incoming
             //editor8182381 — Read blend priority (sbyte) and speed (float) per tile
             var blendPriority:int = compressed.readByte();
             var speed:Number = compressed.readFloat();
+            //editor8182381 — Read advanced ground properties (damage, sink, animate, push, slide)
+            var minDamage:int = compressed.readShort();
+            var maxDamage:int = compressed.readShort();
+            var sink:Boolean = compressed.readBoolean();
+            var animType:uint = compressed.readUnsignedByte();
+            var animDx:Number = compressed.readFloat();
+            var animDy:Number = compressed.readFloat();
+            var push:Boolean = compressed.readBoolean();
+            var slideAmount:Number = compressed.readFloat();
 
             //editor8182381 — Register this custom ground tile in GroundLibrary
-            GroundLibrary.loadBinaryCustomGround(typeCode, pixels, noWalk, blendPriority, speed);
+            GroundLibrary.loadBinaryCustomGround(typeCode, pixels, noWalk, blendPriority, speed,
+               minDamage, maxDamage, sink, animType, animDx, animDy, push, slideAmount);
          }
       }
    }
